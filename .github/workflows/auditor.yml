@@ -1,0 +1,99 @@
+name: auditor
+run-name: auditor PR ${{ github.event.pull_request.number || inputs.pr }} (${{ github.event_name }})
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number
+        required: true
+
+permissions: {}
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      pr: ${{ steps.resolve.outputs.pr }}
+      base: ${{ steps.resolve.outputs.base }}
+      head: ${{ steps.resolve.outputs.head }}
+    steps:
+      - name: Resolve PR
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          REPO: ${{ github.repository }}
+        run: |
+          case "$PR" in ''|*[!0-9]*) echo "bad PR number"; exit 1;; esac
+          gh api "repos/$REPO/pulls/$PR" --jq '"pr=\(.number)\nbase=\(.base.sha)\nhead=\(.head.sha)"' | tee -a "$GITHUB_OUTPUT"
+      - name: Check out main (trusted)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Check out PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.resolve.outputs.head }}
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install --quiet pytest==8.4.2
+      - name: Audit
+        env:
+          BASE: ${{ steps.resolve.outputs.base }}
+          HEAD: ${{ steps.resolve.outputs.head }}
+        run: python3 trusted/tools/auditor.py --repo pr --base "$BASE" --head "$HEAD" --requirements trusted/requirements.md --out result.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: result
+          path: result.json
+
+  report:
+    needs: evaluate
+    if: always() && needs.evaluate.outputs.head != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+      checks: write
+      actions: write
+    steps:
+      - name: Check out main only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          name: result
+          path: in
+      - name: Report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.evaluate.outputs.pr }}
+          HEAD: ${{ needs.evaluate.outputs.head }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 tools/report.py --result in/result.json --pr "$PR" --head "$HEAD" --run-url "$RUN_URL"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verdict
+          path: verdict.json
+      - name: Hand over to the Integrator (dispatched runs do not fire workflow_run)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: gh workflow run integrator.yml -R "$REPO" --ref main -f auditor_run=${{ github.run_id }}

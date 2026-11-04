@@ -1,0 +1,40 @@
+name: integrator
+
+on:
+  workflow_run:
+    workflows: [auditor]
+    types: [completed]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      auditor_run:
+        description: Auditor run ID to act on
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: integrator-${{ github.event_name }}
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+      issues: write
+      statuses: read
+      checks: read
+    steps:
+      - name: Check out main only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Integrate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/integrator.py
